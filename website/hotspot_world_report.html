@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hotspot report</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; color: #20252b; background: #f4f6f8; }
+    main { max-width: 1200px; margin: auto; padding: 24px; }
+    h1, h2 { margin-top: 0; }
+    .stats { display: flex; gap: 12px; margin: 16px 0; }
+    .stat, .panel { background: white; border-radius: 8px; padding: 16px; }
+    .stat { min-width: 150px; }
+    .stat strong { display: block; font-size: 1.5rem; margin-top: 6px; }
+    #map { height: 520px; border-radius: 8px; }
+    .controls { display: flex; align-items: end; gap: 12px; flex-wrap: wrap; }
+    label { display: grid; gap: 6px; font-weight: bold; }
+    input, button { font: inherit; padding: 9px 10px; }
+    button { border: 0; border-radius: 5px; color: white; background: #176b87; cursor: pointer; }
+    button:disabled { cursor: wait; opacity: .65; }
+    #status { color: #536370; line-height: 1.5; }
+    .note { color: #555; line-height: 1.5; }
+    @media (max-width: 600px) {
+      main { padding: 12px; }
+      .stats { flex-wrap: wrap; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Satellite hotspot report</h1>
+  <p>Global MODIS and VIIRS detections for one selected day.</p>
+  <section class="panel">
+    <div class="controls">
+      <label for="selected-date">
+        Select a date
+        <input id="selected-date" type="date">
+      </label>
+      <button id="load-button" type="button">Load global data</button>
+    </div>
+    <p id="status" role="status">Loading hotspot data…</p>
+  </section>
+  <div class="stats">
+    <div class="stat">Total detections<strong id="total-count">—</strong></div>
+    <div class="stat">MODIS detections<strong id="modis-count">—</strong></div>
+    <div class="stat">VIIRS detections<strong id="viirs-count">—</strong></div>
+  </div>
+  <section class="panel">
+    <h2>Hotspot map</h2>
+    <div id="map"></div>
+  </section>
+  <p class="note">MODIS and VIIRS points are satellite thermal detections, not
+  confirmed fires or burned-area boundaries. Counts are detections; multiple
+  satellites may observe the same event. Map tiles require an internet connection.
+  Select a date to load all detections reported for that day.</p>
+</main>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+  const dateInput = document.getElementById("selected-date");
+  const statusText = document.getElementById("status");
+  const loadButton = document.getElementById("load-button");
+  const map = L.map("map", { preferCanvas: true, maxZoom: 8 });
+  L.tileLayer(
+    "https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/" +
+    "BlueMarble_NextGeneration/default/2017-01-01/" +
+    "GoogleMapsCompatible_Level8/{z}/{y}/{x}.jpeg",
+    {
+      maxZoom: 8,
+      attribution: "Imagery courtesy NASA EOSDIS GIBS"
+    }
+  ).addTo(map);
+  map.fitBounds([[-85, -180], [85, 180]]);
+
+  const hotspotLayer = L.layerGroup().addTo(map);
+  function escapeHtml(value) {
+    return String(value).replace(/[&<>"']/g, function (char) {
+      return {"&": "&amp;", "<": "&lt;", ">": "&gt;",
+              '"': "&quot;", "'": "&#39;"}[char];
+    });
+  }
+
+  function renderPoints(points) {
+    hotspotLayer.clearLayers();
+    points.forEach(function (point) {
+      const isModis = point.sensor === "MODIS";
+      const marker = L.circleMarker([point.latitude, point.longitude], {
+        radius: 4,
+        color: isModis ? "#d04b35" : "#2367a8",
+        fillOpacity: 0.7
+      });
+      marker.bindPopup(
+        "<b>" + escapeHtml(point.sensor) + "</b><br>" +
+        "Date: " + escapeHtml(point.date) + "<br>" +
+        "Time: " + escapeHtml(point.time) + "<br>" +
+        "Confidence: " + escapeHtml(point.confidence) + "<br>" +
+        "FRP: " + escapeHtml(point.frp)
+      );
+      marker.addTo(hotspotLayer);
+    });
+  }
+
+  function setCounts(counts, total) {
+    if (!counts) {
+      document.getElementById("total-count").textContent = "—";
+      document.getElementById("modis-count").textContent = "—";
+      document.getElementById("viirs-count").textContent = "—";
+      return;
+    }
+    document.getElementById("total-count").textContent = total;
+    document.getElementById("modis-count").textContent = counts.MODIS || 0;
+    document.getElementById("viirs-count").textContent = counts.VIIRS || 0;
+  }
+
+  async function loadData() {
+    loadButton.disabled = true;
+    statusText.textContent = "Loading global MODIS and VIIRS data from FIRMS…";
+    try {
+      const response = await fetch(
+        "/api/hotspots?date=" + encodeURIComponent(dateInput.value),
+        { cache: "no-store" }
+      );
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Could not load FIRMS data.");
+      setCounts(data.counts, data.total);
+      renderPoints(data.points);
+      statusText.textContent = data.total
+        ? "Loaded " + data.date + ". " + data.note
+        : "FIRMS returned no detections for " + data.date + ".";
+    } catch (error) {
+      setCounts(null, null);
+      renderPoints([]);
+      statusText.textContent = error.message;
+    } finally {
+      loadButton.disabled = false;
+    }
+  }
+
+  const today = new Date();
+  const localToday = [
+    today.getFullYear(),
+    String(today.getMonth() + 1).padStart(2, "0"),
+    String(today.getDate()).padStart(2, "0")
+  ].join("-");
+  const queryDate = new URLSearchParams(window.location.search).get("date");
+  dateInput.min = "2000-11-01";
+  dateInput.max = localToday;
+  dateInput.value = queryDate && queryDate >= dateInput.min && queryDate <= localToday
+    ? queryDate
+    : localToday;
+  loadButton.addEventListener("click", loadData);
+  dateInput.addEventListener("change", loadData);
+  loadData();
+</script>
+</body>
+</html>
